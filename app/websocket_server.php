@@ -22,5 +22,5 @@ $args = array(
 );
 $server->registerApplication(
     'monitorUpstreamApplication', $app['config']['class']::getInstance($args));
-$app['monolog']->addDebug('Worker monitor upstream error started...');
+$app['monolog']->addDebug('Worker monior upstream error started...');
 $server->run();
