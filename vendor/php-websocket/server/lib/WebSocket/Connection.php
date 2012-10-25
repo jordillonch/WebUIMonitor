@@ -78,8 +78,7 @@ class Connection
 		$response = "HTTP/1.1 101 Switching Protocols\r\n";
 		$response.= "Upgrade: websocket\r\n";
 		$response.= "Connection: Upgrade\r\n";
-		$response.= "Sec-WebSocket-Accept: " . $secAccept . "\r\n";
-		$response.= "Sec-WebSocket-Protocol: " . substr($path, 1) . "\r\n\r\n";
+		$response.= "Sec-WebSocket-Accept: " . $secAccept . "\r\n\r\n";
         fwrite($this->socket, $response, strlen($response));
 		$this->handshaked = true;
 		$this->log('Handshake sent');
@@ -129,9 +128,9 @@ class Connection
 		return true;
     }
 
-    public function send($payload, $type = 'text')
+    public function send($payload, $type = 'text', $masked = false)
     {
-		$encodedData = $this->hybi10Encode($payload, $type);
+		$encodedData = $this->hybi10Encode($payload, $type, $masked);
 		if(!@fwrite($this->socket, $encodedData, strlen($encodedData)))
 		{
 			@fclose($this->socket);
@@ -158,10 +157,11 @@ class Connection
         $this->server->log('[client ' . $this->socket_id . '] ' . $message, $type);
     }
 
-	private function hybi10Encode($payload, $type = 'text')
+	private function hybi10Encode($payload, $type = 'text', $masked = true)
 	{
 		$frameHead = array();
 		$frame = '';
+		$payloadLength = strlen($payload);
 
 		switch($type)
 		{
@@ -191,7 +191,7 @@ class Connection
 				if($payloadLength > 65535)
 				{
 					$payloadLengthBin = str_split(sprintf('%064b', $payloadLength), 8);
-					$frameHead[1] = 255;
+			$frameHead[1] = ($masked === true) ? 255 : 127;
 					for($i = 0; $i < 8; $i++)
 					{
 						$frameHead[$i+2] = bindec($payloadLengthBin[$i]);
@@ -206,13 +206,13 @@ class Connection
 				{
 
 					$payloadLengthBin = str_split(sprintf('%016b', $payloadLength), 8);
-					$frameHead[1] = 254;
+			$frameHead[1] = ($masked === true) ? 254 : 126;
 					$frameHead[2] = bindec($payloadLengthBin[0]);
 					$frameHead[3] = bindec($payloadLengthBin[1]);
 				}
 				else
 				{
-					$frameHead[1] = $payloadLength + 128;
+			$frameHead[1] = ($masked === true) ? $payloadLength + 128 : $payloadLength;
 				}
 
 				// convert frame-head to string:
@@ -220,14 +220,24 @@ class Connection
 				{
 					$frameHead[$i] = chr($frameHead[$i]);
 				}
-				$frameHead = array_merge($frameHead, $mask);
-				$frame = implode('', $frameHead);
+		if($masked === true)
+		{
+			// generate a random mask:
+			$mask = array();
+			for($i = 0; $i < 4; $i++)
+			{
+				$mask[$i] = chr(rand(0, 255));
+			}
+
+			$frameHead = array_merge($frameHead, $mask);
+		}
+		$frame = implode('', $frameHead);
 
 				// mask payload data and append to frame:
 				$framePayload = array();
 				for($i = 0; $i < $payloadLength; $i++)
 				{
-					$frame .= $payload[$i] ^ $mask[$i % 4];
+			$frame .= ($masked === true) ? $payload[$i] ^ $mask[$i % 4] : $payload[$i];
 				}
 			break;
 
@@ -253,7 +263,11 @@ class Connection
 		$isMasked = ($secondByteBinary[0] == '1') ? true : false;
 		$payloadLength = ($isMasked === true) ? ord($data[1]) & 127 : ord($data[1]);
 
-		// @TODO: close connection if unmasked frame is received.
+		// close connection if unmasked frame is received:
+		if($isMasked === false)
+		{
+			$this->close(1002);
+		}
 
 		switch($opcode)
 		{
@@ -265,16 +279,25 @@ class Connection
 				{
 				   $mask = substr($data, 4, 4);
 				   $payloadOffset = 8;
+		   $dataLength = bindec(sprintf('%08b', ord($data[2])) . sprintf('%08b', ord($data[3]))) + $payloadOffset;
 				}
 				elseif($payloadLength === 127)
 				{
 					$mask = substr($data, 10, 4);
 					$payloadOffset = 14;
+			$tmp = '';
+			for($i = 0; $i < 8; $i++)
+			{
+				$tmp .= sprintf('%08b', ord($data[$i+2]));
 				}
+			$dataLength = bindec($tmp) + $payloadOffset;
+			unset($tmp);
+		}
 				else
 				{
 					$mask = substr($data, 2, 4);
 					$payloadOffset = 6;
+			$dataLength = $payloadLength + $payloadOffset;
 				}
 
 				$dataLength = strlen($data);
